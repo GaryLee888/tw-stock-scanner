@@ -12,7 +12,8 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(page_title="台股波段完整版", layout="wide")
+# --- 頁面配置 ---
+st.set_page_config(page_title="台股波段完整診斷版", layout="wide")
 
 @st.cache_data(ttl=86400)
 def get_all_tw_symbols():
@@ -37,7 +38,7 @@ def get_all_tw_symbols():
         except: pass
     return sorted(list(set(symbols))), stock_map
 
-# --- 側邊欄：維持所有原始參數 ---
+# --- 側邊欄：完整參數保持 ---
 with st.sidebar:
     st.header("⚙️ 策略完整參數")
     webhook_url = st.text_input("Discord Webhook", type="password")
@@ -62,20 +63,28 @@ with st.sidebar:
     start_btn = st.button("🚀 開始全參數掃描", use_container_width=True)
 
 # --- 主畫面 ---
-st.title("📊 台股波段精選 (完整參數偵測版)")
+st.title("📊 台股波段精選系統")
 
 if start_btn:
     symbols, stock_name_map = get_all_tw_symbols()
     candidates = []
-    stats = {"total": len(symbols), "scanned": 0, "fail": 0, "r_change": 0, "r_red": 0, "r_ma": 0, "r_bias": 0, "r_vol": 0, "r_vcp": 0, "r_kd": 0, "pass": 0}
+    # 診斷統計數據
+    stats = {
+        "total": len(symbols), "scanned": 0, "fail": 0, 
+        "r_change": 0, "r_red": 0, "r_ma": 0, "r_bias": 0, 
+        "r_vol": 0, "r_vcp": 0, "r_kd": 0, "pass": 0
+    }
 
-    # 儀表板
+    # 頂部狀態列
     m1, m2, m3 = st.columns(3)
     stat_total = m1.metric("掃描總數", f"{stats['total']}")
     stat_scan = m2.metric("已完成", "0")
-    stat_pass = m3.metric("符合條件", "0")
+    stat_pass = m3.metric("符合條件標的", "0")
     
-    diag_expander = st.expander("🛠️ 即時篩選診斷日誌", expanded=True)
+    # 診斷日誌顯示區 (直接顯示，不隱藏)
+    st.subheader("🛠️ 即時過濾診斷日誌")
+    diag_status = st.empty() 
+    
     progress_bar = st.progress(0)
     
     chunk_size = 40
@@ -95,11 +104,11 @@ if start_btn:
                     p_today, p_prev = float(c.iloc[-1]), float(c.iloc[-2])
                     change = ((p_today - p_prev) / p_prev) * 100
                     
-                    # 1. 漲幅與紅K
+                    # 1. 漲幅/紅K 診斷
                     if change < t_c: stats["r_change"] += 1; continue
                     if v_red and p_today <= o.iloc[-1]: stats["r_red"] += 1; continue
                     
-                    # 2. 均線與乖離
+                    # 2. 均線/乖離 診斷
                     ma5 = SMAIndicator(c, window=5).sma_indicator().iloc[-1]
                     ma20 = SMAIndicator(c, window=20).sma_indicator().iloc[-1]
                     if (v5 and p_today < ma5) or (v20 and p_today < ma20): stats["r_ma"] += 1; continue
@@ -107,21 +116,21 @@ if start_btn:
                     bias = ((p_today - ma20) / ma20) * 100
                     if bias > m_bias: stats["r_bias"] += 1; continue
                     
-                    # 3. 成交量
+                    # 3. 量能 診斷
                     vma5 = v.rolling(5).mean().iloc[-1]
                     if (vma5 / 1000) < m_avg_vol or (v.iloc[-1] / vma5) < v_ratio: stats["r_vol"] += 1; continue
                     
-                    # 4. VCP (ATR 波動比)
+                    # 4. VCP 診斷
                     atr_s = AverageTrueRange(h, l, c, window=14).average_true_range()
                     vcp_val = (atr_s.iloc[-1] / atr_s.tail(20).mean())
                     if vcp_val > vcp_limit: stats["r_vcp"] += 1; continue
                         
-                    # 5. KD
+                    # 5. KD 診斷
                     stoch = StochasticOscillator(h, l, c, window=9)
                     if not (stoch.stoch().iloc[-1] > stoch.stoch_signal().iloc[-1] and stoch.stoch().iloc[-1] < k_limit):
                         stats["r_kd"] += 1; continue
 
-                    # 通過
+                    # 全部通過
                     stats["pass"] += 1
                     score = (change * 0.4) + ((v.iloc[-1] / vma5) * 4) + (10 - bias)
                     sl = max(p_today - (atr_s.iloc[-1] * atr_multi), l.tail(10).min() * 0.99)
@@ -134,10 +143,29 @@ if start_btn:
                 except: stats["fail"] += 1
         except: pass
         
+        # 更新儀表板
         stat_scan.metric("已完成", f"{stats['scanned']}")
-        stat_pass.metric("符合條件", f"{stats['pass']}")
-        with diag_expander:
-            st.write(f"📊 診斷: 漲幅/紅K剔除({stats['r_change'] + stats['r_red']}) | 均線/乖離剔除({stats['r_ma'] + stats['r_bias']}) | 量能/VCP剔除({stats['r_vol'] + stats['r_vcp']}) | KD剔除({stats['r_kd']})")
+        stat_pass.metric("符合條件標的", f"{stats['pass']}")
+        
+        # 更新詳細診斷日誌文字
+        diag_text = f"""
+        - 📥 下載失敗或資料不足: **{stats['fail']}**
+        - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
+        - ❌ 未收紅K: **{stats['r_red']}**
+        - ❌ 均線未站上 (5MA/20MA): **{stats['r_ma']}**
+        - ❌ 乖離率過高 (>{m_bias}%): **{stats['r_bias']}**
+        - ❌ 成交量能不足 (量比/均量): **{stats['r_vol']}**
+        - ❌ VCP波動過大 (>{vcp_limit}): **{stats['r_vcp']}**
+        - ❌ KD指標不符: **{stats['r_kd']}**
+        """
+        diag_status.markdown(diag_text)
 
+    # --- 最終結果顯示 ---
+    st.divider()
     if candidates:
-        st.dataframe(pd.DataFrame(candidates).sort_values("score", ascending=False).drop(columns=['score', 'sl', 'tp']), use_container_width=True)
+        st.success(f"✅ 掃描完成！共發現 {len(candidates)} 檔符合條件標的。")
+        final_df = pd.DataFrame(candidates).sort_values("score", ascending=False).head(10)
+        st.subheader("🏆 波段精選 Top 10")
+        st.dataframe(final_df.drop(columns=['score', 'sl', 'tp']), use_container_width=True)
+    else:
+        st.error("😭 掃描完成，但沒有任何股票符合全部篩選條件。請參考上方的診斷日誌調整參數。")
