@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="台股波段完整診斷版", layout="wide")
 
 # --- 設定區：請在此輸入您的預設 Webhook 網址 ---
-DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/917970232084152411/kkkoyrfBEpN-UVEqweE0iNtpuUFjK4UAc7UKQWaJmio6rT5FJ1TukrE2xARYEZyeuKrQ"
+DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1457393304537927764/D2vpM73dMl2Z-bLfI0Us52eGdCQyjztASwkBP3RzyF2jaALzEeaigajpXQfzsgLdyzw4"
 
 @st.cache_data(ttl=86400)
 def get_all_tw_symbols():
@@ -168,3 +168,4 @@ if start_btn:
             requests.post(webhook_url, json={"content": msg})
     else:
         st.error("😭 掃描完成，無符合條件標的。請檢查日誌調整參數。")
+
