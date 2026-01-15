@@ -7,39 +7,27 @@ from ta.momentum import StochasticOscillator
 from ta.volatility import AverageTrueRange
 import requests
 import io
-import datetime
 import time
 import matplotlib.pyplot as plt
 import urllib3
 
-# 禁用 SSL 警告 (針對 verify=False)
+# 禁用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 網頁基礎設定 ---
-st.set_page_config(page_title="台股波段選股戰報", layout="wide")
+st.set_page_config(page_title="台股波段選股診斷版", layout="wide")
 
-# --- 1. 獲取全台股清單 (修正 SSL 錯誤) ---
 @st.cache_data(ttl=86400)
 def get_all_tw_symbols():
     symbols = []
     stock_map = {}
-    urls = [
-        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", 
-        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
-    ]
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-
+    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
+    headers = {'User-Agent': 'Mozilla/5.0'}
     for url in urls:
         try:
-            # 加入 verify=False 解決 SSL 錯誤
             res = requests.get(url, headers=headers, timeout=15, verify=False)
             res.encoding = 'big5'
             df = pd.read_html(io.StringIO(res.text))[0]
             df.columns = df.iloc[0]
-            
             for item in df['有價證券代號及名稱'].iloc[2:]:
                 if '　' in str(item):
                     code, name = str(item).split('　')
@@ -48,154 +36,116 @@ def get_all_tw_symbols():
                         full_code = f"{code}{suffix}"
                         symbols.append(full_code)
                         stock_map[full_code] = name
-        except Exception as e:
-            st.error(f"⚠️ 獲取清單失敗 ({url}): {e}")
-            
-    if not symbols:
-        # 備用方案：如果證交所連不上，至少提供權值股測試
-        symbols = ["2330.TW", "2317.TW", "2454.TW", "2603.TW", "2303.TW", "2308.TW", "2382.TW"]
-        stock_map = {"2330.TW":"台積電", "2317.TW":"鴻海", "2454.TW":"聯發科", "2603.TW":"長榮"}
-        
+        except: pass
     return sorted(list(set(symbols))), stock_map
 
-# --- 2. Discord 繪圖函數 ---
-def generate_report_image(target_list, page_num=1):
-    try:
-        fig, axes = plt.subplots(len(target_list), 1, figsize=(10, 3*len(target_list)))
-        fig.patch.set_facecolor('#0d1117')
-        if len(target_list) == 1: axes = [axes]
-        
-        for ax, row in zip(axes, target_list):
-            ax.set_facecolor('#161b22')
-            prices = row['history'].tail(30)
-            ax.plot(range(len(prices)), prices.values, color='#58a6ff', lw=2)
-            ax.set_title(f"{row['name']} ({row['code']}) - Score: {row['score']:.1f}", color='white', fontsize=12)
-            ax.tick_params(colors='gray', labelsize=8)
-            ax.grid(color='#30363d', linestyle=':', alpha=0.5)
-        
-        plt.tight_layout()
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        buf.seek(0)
-        plt.close(fig)
-        return buf
-    except:
-        return None
+# --- 介面設計 ---
+st.title("🚀 台股強勢選股 (含偵測診斷系統)")
 
-# --- 側邊欄控制面板 ---
 with st.sidebar:
-    st.title("🛡️ 策略控制中心")
-    webhook_url = st.text_input("Discord Webhook URL", type="password", help="推播掃描結果用")
-    
-    st.subheader("篩選參數")
+    st.header("⚙️ 策略與推播")
+    webhook_url = st.text_input("Discord Webhook", type="password")
     t_c = st.number_input("漲幅 >%", value=2.0, step=0.1)
     v_ratio = st.number_input("量比 >", value=1.5, step=0.1)
-    m_avg_vol = st.number_input("5日均量 > (張)", value=3000)
-    m_bias = st.number_input("20MA乖離 < %", value=8.0)
-    k_limit = st.slider("KD K值 <", 0, 100, 80)
+    m_avg_vol = st.number_input("5日均量 >(張)", value=3000)
     
     st.divider()
     v_red = st.checkbox("今日紅K", value=True)
     v5 = st.checkbox("站上5MA", value=True)
     v20 = st.checkbox("站上20MA", value=True)
-    
-    debug_mode = st.checkbox("偵錯模式 (顯示抓取狀態)", value=False)
-    
-    start_btn = st.button("🚀 開始全台股掃描", use_container_width=True)
-
-# --- 主畫面執行邏輯 ---
-st.title("🚀 台股波段強勢精選掃描器")
+    start_btn = st.button("🚀 開始全自動掃描", use_container_width=True)
 
 if start_btn:
     symbols, stock_name_map = get_all_tw_symbols()
     candidates = []
     
+    # --- 診斷統計初始化 ---
+    stats = {
+        "total": len(symbols),
+        "scanned": 0,
+        "fail_download": 0,
+        "reject_change": 0,
+        "reject_red_k": 0,
+        "reject_ma": 0,
+        "reject_vol": 0,
+        "reject_kd": 0,
+        "passed": 0
+    }
+
+    # 建立診斷顯示區
+    diag_col1, diag_col2, diag_col3 = st.columns(3)
+    stat_total = diag_col1.metric("掃描總數", f"{stats['total']}")
+    stat_scan = diag_col2.metric("已完成", "0")
+    stat_pass = diag_col3.metric("符合條件", "0", delta_color="normal")
+    
+    debug_area = st.expander("🛠️ 詳細篩選診斷日誌 (即時更新)", expanded=True)
     progress_bar = st.progress(0)
-    status_text = st.empty()
     
-    chunk_size = 40  # 穩定下載量
-    total = len(symbols)
-    
-    for i in range(0, total, chunk_size):
+    chunk_size = 40
+    for i in range(0, stats['total'], chunk_size):
         batch = symbols[i : i + chunk_size]
-        status_text.info(f"🔍 掃描中: {i}/{total} (已發現 {len(candidates)} 檔符合條件)")
-        progress_bar.progress(i / total)
+        progress_bar.progress(i / stats['total'])
         
         try:
-            # 下載資料
-            data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False, timeout=25)
+            data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False)
             
-            if data.empty:
-                continue
-
             for s in batch:
+                stats["scanned"] += 1
                 try:
                     df = data[s].dropna() if len(batch) > 1 else data.dropna()
-                    if len(df) < 35: continue
+                    if len(df) < 35:
+                        stats["fail_download"] += 1
+                        continue
                     
                     c, h, l, v, o = df['Close'], df['High'], df['Low'], df['Volume'], df['Open']
                     p_today, p_prev = float(c.iloc[-1]), float(c.iloc[-2])
                     change = ((p_today - p_prev) / p_prev) * 100
                     
-                    # 篩選邏輯
-                    if change < t_c: continue
-                    if v_red and p_today <= o.iloc[-1]: continue
+                    # 診斷篩選過程
+                    if change < t_c:
+                        stats["reject_change"] += 1; continue
+                    if v_red and p_today <= o.iloc[-1]:
+                        stats["reject_red_k"] += 1; continue
                     
                     ma5 = SMAIndicator(c, window=5).sma_indicator().iloc[-1]
                     ma20 = SMAIndicator(c, window=20).sma_indicator().iloc[-1]
-                    if v5 and p_today < ma5: continue
-                    if v20 and p_today < ma20: continue
-                    
-                    bias = ((p_today - ma20) / ma20) * 100
-                    if bias > m_bias: continue
+                    if (v5 and p_today < ma5) or (v20 and p_today < ma20):
+                        stats["reject_ma"] += 1; continue
                     
                     vma5 = v.rolling(5).mean().iloc[-1]
-                    if (vma5 / 1000) < m_avg_vol: continue
-                    if (v.iloc[-1] / vma5) < v_ratio: continue
-                    
+                    if (vma5 / 1000) < m_avg_vol or (v.iloc[-1] / vma5) < v_ratio:
+                        stats["reject_vol"] += 1; continue
+                        
                     stoch = StochasticOscillator(h, l, c, window=9)
-                    k_val = stoch.stoch().iloc[-1]
-                    d_val = stoch.stoch_signal().iloc[-1]
-                    if not (k_val > d_val and k_val < k_limit): continue
+                    if not (stoch.stoch().iloc[-1] > stoch.stoch_signal().iloc[-1]):
+                        stats["reject_kd"] += 1; continue
 
-                    atr_s = AverageTrueRange(h, l, c, window=14).average_true_range()
-                    atr_now = atr_s.iloc[-1]
-                    
-                    # 評分與計算
-                    score = (change * 0.4) + ((v.iloc[-1] / vma5) * 4) + (10 - bias)
+                    # 通過篩選
+                    stats["passed"] += 1
+                    atr_now = AverageTrueRange(h, l, c, window=14).average_true_range().iloc[-1]
+                    score = (change * 0.4) + ((v.iloc[-1] / vma5) * 4)
                     sl = max(p_today - (atr_now * 2.5), l.tail(10).min() * 0.99)
-                    tp = p_today + (p_today - sl) * 2
                     
                     candidates.append({
                         "代碼": s, "名稱": stock_name_map.get(s, "未知"), "現價": round(p_today, 2), 
-                        "漲幅%": round(change, 2), "評分": round(score, 1), "停利": round(tp, 1), 
-                        "停損": round(sl, 1), "5日均量": int(vma5/1000),
-                        "score": score, "code": s, "name": stock_name_map.get(s, "未知"), 
-                        "tp": tp, "sl": sl, "history": c
+                        "漲幅%": round(change, 2), "評分": round(score, 1), "score": score,
+                        "history": c, "tp": p_today + (p_today-sl)*2, "sl": sl
                     })
-                except: continue
-        except Exception as e:
-            if debug_mode: st.warning(f"批次 {i} 下載跳過: {e}")
-            
-        time.sleep(0.3)
+                except: stats["fail_download"] += 1
+        except: pass
+        
+        # 每批次更新一次 UI
+        stat_scan.metric("已完成", f"{stats['scanned']}")
+        stat_pass.metric("符合條件", f"{stats['passed']}")
+        with debug_area:
+            st.write(f"⏱️ 診斷狀態: 下載失敗({stats['fail_download']}) | 漲幅不符({stats['reject_change']}) | 未收紅({stats['reject_red_k']}) | 均線不符({stats['reject_ma']}) | 量能不足({stats['reject_vol']})")
 
     progress_bar.progress(1.0)
-    status_text.success(f"✅ 掃描完成！發現 {len(candidates)} 檔股票。")
-
+    
+    # --- 結果展示 ---
     if candidates:
-        final_list = sorted(candidates, key=lambda x: x['score'], reverse=True)[:10]
-        st.subheader("🏆 波段精選結果 Top 10")
-        
-        display_df = pd.DataFrame(final_list).drop(columns=['score', 'code', 'name', 'tp', 'sl', 'history'])
-        st.dataframe(display_df, use_container_width=True)
-        
-        if webhook_url:
-            with st.spinner("🚀 正在推播戰報至 Discord..."):
-                for idx in range(0, len(final_list), 5):
-                    chunk = final_list[idx:idx+5]
-                    img = generate_report_image(chunk, page_num=(idx//5)+1)
-                    if img:
-                        requests.post(webhook_url, files={"file": ("report.png", img, "image/png")}, data={"content": "📊 手機 Web 版掃描結果"})
-            st.toast("Discord 推播成功！")
+        st.success(f"✅ 掃描完成！發現 {len(candidates)} 檔標的")
+        final_df = pd.DataFrame(candidates).sort_values("score", ascending=False).head(10)
+        st.dataframe(final_df.drop(columns=['score', 'history', 'tp', 'sl']), use_container_width=True)
     else:
-        st.warning("⚠️ 沒有股票符合當前條件，請嘗試放寬參數。")
+        st.error("❌ 掃描結束，無任何股票符合條件。請參考上方的詳細診斷日誌調整參數。")
