@@ -23,18 +23,20 @@ DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1457393304537927764/D2vpM73d
 def get_all_tw_symbols():
     symbols = []
     stock_map = {}
-    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
     
-    # 換成更像真人瀏覽器的 User-Agent，避免被證交所阻擋
+    # 嘗試 1：原始證交所來源 (加上 flavor 參數)
+    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
     }
     
-    for url in urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=15, verify=False)
+    try:
+        for url in urls:
+            res = requests.get(url, headers=headers, timeout=10, verify=False)
             res.encoding = 'big5'
-            df = pd.read_html(io.StringIO(res.text))[0]
+            # 強制使用 html5lib 解析，避免找不到 table
+            df = pd.read_html(io.StringIO(res.text), flavor='html5lib')[0]
             df.columns = df.iloc[0]
             for item in df['有價證券代號及名稱'].iloc[2:]:
                 if '　' in str(item):
@@ -44,15 +46,40 @@ def get_all_tw_symbols():
                         full_code = f"{code}{suffix}"
                         symbols.append(full_code)
                         stock_map[full_code] = name
-        except Exception as e:
-            # 把錯誤印出來，方便除錯
-            st.error(f"⚠️ 獲取清單失敗: {url}\n錯誤細節: {e}")
+                        
+        if symbols:
+            return sorted(list(set(symbols))), stock_map
+            
+    except Exception as e:
+        # 如果失敗（例如在 Streamlit Cloud 被擋 IP），就默默進入備用方案
+        pass
 
-    # 如果清單是空的，在畫面上跳出嚴重警告
-    if not symbols:
-        st.error("🚨 警告：無法獲取台股代碼清單！請檢查網路連線或證交所網站是否異常。")
+    # 嘗試 2：備用開源資料庫 (解決 Streamlit Cloud 被擋海外 IP 的問題)
+    try:
+        backup_url = "https://raw.githubusercontent.com/shihjen/twstock/master/twstock/codes.json"
+        res = requests.get(backup_url, timeout=10)
+        data = res.json()
+        
+        for code, info in data.items():
+            if info.get('type') == '股票' and len(code) == 4:
+                market = info.get('market')
+                if market == '上市':
+                    symbols.append(f"{code}.TW")
+                    stock_map[f"{code}.TW"] = info.get('name')
+                elif market == '上櫃':
+                    symbols.append(f"{code}.TWO")
+                    stock_map[f"{code}.TWO"] = info.get('name')
+                    
+        if symbols:
+            st.success("✅ 成功從備用資料庫載入股票清單！")
+            return sorted(list(set(symbols))), stock_map
+            
+    except Exception as e:
+        st.error(f"⚠️ 備用資料庫也連線失敗: {e}")
 
-    return sorted(list(set(symbols))), stock_map
+    # 如果兩個都失敗
+    st.error("🚨 警告：無法獲取台股代碼清單！請檢查網路連線。")
+    return [], {}
 
 # --- 側邊欄：完整參數保持 ---
 with st.sidebar:
@@ -84,7 +111,7 @@ st.title("📊 台股波段精選系統")
 if start_btn:
     symbols, stock_name_map = get_all_tw_symbols()
     
-    # 增加一層防呆：如果真的沒抓到清單，直接停止後續掃描動作
+    # 防呆：如果真的沒抓到清單，直接停止後續掃描動作
     if not symbols:
         st.stop()
         
@@ -110,6 +137,7 @@ if start_btn:
         progress_bar.progress(min((i + chunk_size) / stats['total'], 1.0)) # 確保進度條不超過1.0
         
         try:
+            # yfinance 下載歷史資料
             data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False)
             for s in batch:
                 stats["scanned"] += 1
@@ -121,7 +149,7 @@ if start_btn:
                     p_today, p_prev = float(c.iloc[-1]), float(c.iloc[-2])
                     change = ((p_today - p_prev) / p_prev) * 100
                     
-                    # 邏輯過濾區 (與原版一致)
+                    # 邏輯過濾區
                     if change < t_c: stats["r_change"] += 1; continue
                     if v_red and p_today <= o.iloc[-1]: stats["r_red"] += 1; continue
                     
