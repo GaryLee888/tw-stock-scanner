@@ -10,12 +10,10 @@ import io
 import time
 import random
 import urllib3
-import logging # 新增：用來控制日誌顯示
+import logging 
 
 # --- 終極靜音設定 ---
-# 禁用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-# 禁用 yfinance 在終端機狂印 possibly delisted 的紅字錯誤
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # --- 頁面配置 ---
@@ -121,6 +119,7 @@ if start_btn:
         st.stop()
         
     candidates = []
+    failed_list = [] # 新增：用來記錄失敗的股票名單與原因
     stats = {
         "total": len(symbols), "scanned": 0, "fail": 0, 
         "r_change": 0, "r_red": 0, "r_ma": 0, "r_bias": 0, 
@@ -152,8 +151,10 @@ if start_btn:
             except Exception as e:
                 if attempt < 2: time.sleep(1.5)
         
+        # 紀錄失敗標的
         if df.empty or len(df) < 35:
             stats["fail"] += 1
+            failed_list.append({"代碼": s, "名稱": stock_name_map.get(s, "未知"), "原因": "無歷史資料 / 暫停交易 / 剛下市"})
         else:
             try:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -214,6 +215,7 @@ if start_btn:
                                         })
             except Exception as e:
                 stats["fail"] += 1
+                failed_list.append({"代碼": s, "名稱": stock_name_map.get(s, "未知"), "原因": f"資料解析錯誤 ({str(e)})"})
             
         if i % 10 == 0 or i == stats['total'] - 1:
             progress_bar.progress((i + 1) / stats['total'])
@@ -235,12 +237,15 @@ if start_btn:
         time.sleep(random.uniform(0.1, 0.4))
 
     st.divider()
+    
+    # 成功篩選出的標的區塊 (與發送 Discord)
     if candidates:
         st.success(f"✅ 掃描完成！共發現 {len(candidates)} 檔潛力標的。")
         final_df = pd.DataFrame(candidates).sort_values("score", ascending=False).head(10)
         st.subheader("🏆 波段精選 Top 10")
         st.dataframe(final_df.drop(columns=['score', 'sl', 'tp']), use_container_width=True)
         
+        # 只把成功的標的發送到 Discord
         if webhook_url:
             msg = "📊 **台股波段掃描戰報**\n"
             for _, row in final_df.iterrows():
@@ -251,3 +256,9 @@ if start_btn:
                 st.warning(f"Discord 訊息發送失敗: {e}")
     else:
         st.error("😭 掃描完成，無符合條件標的。")
+
+    # 新增：查無資料的標的區塊 (僅顯示在網頁端)
+    if failed_list:
+        st.write("") # 增加點留白
+        with st.expander(f"🔍 查看【查無資料 / 終止上市 / 異常】標的清單 (共 {len(failed_list)} 檔)"):
+            st.dataframe(pd.DataFrame(failed_list), use_container_width=True)
