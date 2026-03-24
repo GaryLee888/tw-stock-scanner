@@ -7,3 +7,5 @@ requests
 matplotlib
 lxml
 openpyxl
+html5lib
+lxml
