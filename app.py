@@ -8,7 +8,7 @@ from ta.volatility import AverageTrueRange
 import requests
 import io
 import time
-import random  # 新增：用來產生隨機人類延遲
+import random
 import urllib3
 
 # 禁用 SSL 警告
@@ -25,26 +25,36 @@ def get_all_tw_symbols():
     symbols = []
     stock_map = {}
     
-    # 嘗試 1：原始證交所來源
-    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
+    # 嘗試 1：原始證交所來源 (包含上市、上櫃、興櫃)
+    urls = [
+        ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", ".TW"),   # 上市
+        ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=4", ".TWO"),  # 上櫃
+        ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=5", ".TWO")   # 興櫃
+    ]
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
     try:
-        for url in urls:
+        for url, suffix in urls:
             res = requests.get(url, headers=headers, timeout=10, verify=False)
             res.encoding = 'big5'
             df = pd.read_html(io.StringIO(res.text), flavor='html5lib')[0]
             df.columns = df.iloc[0]
-            for item in df['有價證券代號及名稱'].iloc[2:]:
+            
+            # 同時讀取代號與 CFICode (用來確認是否為普通股)
+            for item, cfi in zip(df['有價證券代號及名稱'].iloc[2:], df['CFICode'].iloc[2:]):
                 if '　' in str(item):
                     code, name = str(item).split('　')
-                    if len(code) == 4:
-                        suffix = ".TW" if "strMode=2" in url else ".TWO"
-                        full_code = f"{code}{suffix}"
-                        symbols.append(full_code)
-                        stock_map[full_code] = name
+                    
+                    # 嚴格過濾：4碼、純數字、且開頭不能是 0(ETF) 或 9(TDR)
+                    if len(code) == 4 and code.isdigit() and code[0] not in ['0', '9']:
+                        # 雙重確認：CFICode 必須是 ES 開頭 (代表 Equity Shares 普通股)
+                        if str(cfi).startswith('ES'):
+                            full_code = f"{code}{suffix}"
+                            symbols.append(full_code)
+                            stock_map[full_code] = name
+                            
         if symbols:
             return sorted(list(set(symbols))), stock_map
     except:
@@ -59,18 +69,20 @@ def get_all_tw_symbols():
             for item in data.get("data", []):
                 code = item.get("stock_id")
                 name = item.get("stock_name")
-                if code and len(code) == 4 and code.isdigit():
+                
+                # 嚴格過濾：4碼、純數字、且開頭不能是 0 或 9
+                if code and len(code) == 4 and code.isdigit() and code[0] not in ['0', '9']:
                     market = item.get("type")
-                    if market == "twse": 
+                    if market == "twse": # 上市
                         full_code = f"{code}.TW"
                         symbols.append(full_code)
                         stock_map[full_code] = name
-                    elif market == "tpex": 
+                    elif market in ["tpex", "rotc"]: # 上櫃(tpex) 或 興櫃(rotc)
                         full_code = f"{code}.TWO"
                         symbols.append(full_code)
                         stock_map[full_code] = name
             if symbols:
-                st.success("✅ 成功從備用資料庫載入股票清單！")
+                st.success("✅ 成功從備用資料庫載入股票清單！(已過濾 ETF/TDR，專注於上市/上櫃/興櫃普通股)")
                 return sorted(list(set(symbols))), stock_map
     except Exception as e:
         st.error(f"⚠️ 備用資料庫連線失敗: {e}")
@@ -123,7 +135,7 @@ if start_btn:
     stat_scan = m2.metric("已完成", "0")
     stat_pass = m3.metric("符合條件標的", "0")
     
-    st.subheader("🛠️ 即時過濾診斷日誌 (自動重試防禦模式啟動)")
+    st.subheader("🛠️ 即時過濾診斷日誌 (專注掃描普通股)")
     diag_status = st.empty() 
     progress_bar = st.progress(0)
     
@@ -131,31 +143,27 @@ if start_btn:
         stats["scanned"] += 1
         df = pd.DataFrame()
         
-        # 【關鍵防護：自動重試機制】最多試 3 次
+        # 自動重試機制 (最多試 3 次)
         for attempt in range(3):
             try:
                 temp_df = yf.download(s, period="60d", progress=False, threads=False)
                 if not temp_df.empty and len(temp_df) >= 35:
                     df = temp_df
-                    break  # 成功抓到資料，提早離開重試迴圈
+                    break
                 else:
-                    # 如果抓不到資料 (可能被擋)，休息 1.5 秒再試一次
                     if attempt < 2: time.sleep(1.5)
             except Exception as e:
                 if attempt < 2: time.sleep(1.5)
         
-        # 3 次都失敗，代表這檔股票真的一點資料都沒有 (例如下市/特別股)
         if df.empty or len(df) < 35:
             stats["fail"] += 1
         else:
             try:
-                # 防呆：處理 yfinance 偶爾回傳 MultiIndex 的情況
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                     
                 c, h, l, v, o = df['Close'], df['High'], df['Low'], df['Volume'], df['Open']
                 
-                # 防呆：確保轉為 1D 陣列
                 if isinstance(c, pd.DataFrame): c = c.iloc[:, 0]
                 if isinstance(h, pd.DataFrame): h = h.iloc[:, 0]
                 if isinstance(l, pd.DataFrame): l = l.iloc[:, 0]
@@ -211,14 +219,14 @@ if start_btn:
             except Exception as e:
                 stats["fail"] += 1
             
-        # 更新畫面
+        # 為了順暢度，每掃描 10 檔或最後一檔時才更新一次畫面
         if i % 10 == 0 or i == stats['total'] - 1:
             progress_bar.progress((i + 1) / stats['total'])
             stat_scan.metric("已完成", f"{stats['scanned']}")
             stat_pass.metric("符合條件標的", f"{stats['pass']}")
             
             diag_text = f"""
-            - 📥 查無此股票 (下市/冷門ETF/無資料): **{stats['fail']}**
+            - 📥 查無資料 (可能無交易量之興櫃/下市): **{stats['fail']}**
             - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
             - ❌ 未收紅K: **{stats['r_red']}**
             - ❌ 均線未站上 (5MA/20MA): **{stats['r_ma']}**
@@ -229,7 +237,7 @@ if start_btn:
             """
             diag_status.markdown(diag_text)
             
-        # 【關鍵防護：人類行為模擬】隨機休息 0.1 到 0.4 秒，破除機器人偵測
+        # 隨機休息 0.1 到 0.4 秒
         time.sleep(random.uniform(0.1, 0.4))
 
     st.divider()
