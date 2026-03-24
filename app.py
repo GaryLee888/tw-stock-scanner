@@ -8,6 +8,7 @@ from ta.volatility import AverageTrueRange
 import requests
 import io
 import time
+import random  # 新增：用來產生隨機人類延遲
 import urllib3
 
 # 禁用 SSL 警告
@@ -122,21 +123,32 @@ if start_btn:
     stat_scan = m2.metric("已完成", "0")
     stat_pass = m3.metric("符合條件標的", "0")
     
-    st.subheader("🛠️ 即時過濾診斷日誌 (採打帶跑戰術，防阻擋)")
+    st.subheader("🛠️ 即時過濾診斷日誌 (自動重試防禦模式啟動)")
     diag_status = st.empty() 
     progress_bar = st.progress(0)
     
-    # 拔除自訂 Session，改為一檔一檔下載
     for i, s in enumerate(symbols):
         stats["scanned"] += 1
+        df = pd.DataFrame()
         
-        try:
-            # 每次只呼叫單一股票，不使用 batch
-            df = yf.download(s, period="60d", progress=False, threads=False)
-            
-            if df.empty or len(df) < 35:
-                stats["fail"] += 1
-            else:
+        # 【關鍵防護：自動重試機制】最多試 3 次
+        for attempt in range(3):
+            try:
+                temp_df = yf.download(s, period="60d", progress=False, threads=False)
+                if not temp_df.empty and len(temp_df) >= 35:
+                    df = temp_df
+                    break  # 成功抓到資料，提早離開重試迴圈
+                else:
+                    # 如果抓不到資料 (可能被擋)，休息 1.5 秒再試一次
+                    if attempt < 2: time.sleep(1.5)
+            except Exception as e:
+                if attempt < 2: time.sleep(1.5)
+        
+        # 3 次都失敗，代表這檔股票真的一點資料都沒有 (例如下市/特別股)
+        if df.empty or len(df) < 35:
+            stats["fail"] += 1
+        else:
+            try:
                 # 防呆：處理 yfinance 偶爾回傳 MultiIndex 的情況
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -196,17 +208,17 @@ if start_btn:
                                             "漲幅%": round(change, 2), "評分": round(score, 1), "乖離%": round(bias, 1),
                                             "VCP比": round(vcp_val, 2), "score": score, "sl": sl, "tp": p_today + (p_today-sl)*2
                                         })
-        except Exception as e:
-            stats["fail"] += 1
+            except Exception as e:
+                stats["fail"] += 1
             
-        # 為了順暢度，每掃描 10 檔或最後一檔時才更新一次畫面
+        # 更新畫面
         if i % 10 == 0 or i == stats['total'] - 1:
             progress_bar.progress((i + 1) / stats['total'])
             stat_scan.metric("已完成", f"{stats['scanned']}")
             stat_pass.metric("符合條件標的", f"{stats['pass']}")
             
             diag_text = f"""
-            - 📥 下載無資料 (ETF/下市/被擋): **{stats['fail']}**
+            - 📥 查無此股票 (下市/冷門ETF/無資料): **{stats['fail']}**
             - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
             - ❌ 未收紅K: **{stats['r_red']}**
             - ❌ 均線未站上 (5MA/20MA): **{stats['r_ma']}**
@@ -217,8 +229,8 @@ if start_btn:
             """
             diag_status.markdown(diag_text)
             
-        # 【打帶跑戰術關鍵】每抓一檔，強制暫停 0.15 秒，避免被 Yahoo 鎖定
-        time.sleep(0.15)
+        # 【關鍵防護：人類行為模擬】隨機休息 0.1 到 0.4 秒，破除機器人偵測
+        time.sleep(random.uniform(0.1, 0.4))
 
     st.divider()
     if candidates:
