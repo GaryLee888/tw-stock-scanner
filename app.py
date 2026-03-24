@@ -24,7 +24,7 @@ def get_all_tw_symbols():
     symbols = []
     stock_map = {}
     
-    # 嘗試 1：原始證交所來源 (加上 flavor 參數)
+    # 嘗試 1：原始證交所來源
     urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -35,7 +35,6 @@ def get_all_tw_symbols():
         for url in urls:
             res = requests.get(url, headers=headers, timeout=10, verify=False)
             res.encoding = 'big5'
-            # 強制使用 html5lib 解析，避免找不到 table
             df = pd.read_html(io.StringIO(res.text), flavor='html5lib')[0]
             df.columns = df.iloc[0]
             for item in df['有價證券代號及名稱'].iloc[2:]:
@@ -51,29 +50,35 @@ def get_all_tw_symbols():
             return sorted(list(set(symbols))), stock_map
             
     except Exception as e:
-        # 如果失敗（例如在 Streamlit Cloud 被擋 IP），就默默進入備用方案
-        pass
+        pass # 如果被阻擋，默默進入備用方案
 
-    # 嘗試 2：備用開源資料庫 (解決 Streamlit Cloud 被擋海外 IP 的問題)
+    # 嘗試 2：穩定版備用資料庫 (FinMind API)
     try:
-        backup_url = "https://raw.githubusercontent.com/shihjen/twstock/master/twstock/codes.json"
+        backup_url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = requests.get(backup_url, timeout=10)
         data = res.json()
         
-        for code, info in data.items():
-            if info.get('type') == '股票' and len(code) == 4:
-                market = info.get('market')
-                if market == '上市':
-                    symbols.append(f"{code}.TW")
-                    stock_map[f"{code}.TW"] = info.get('name')
-                elif market == '上櫃':
-                    symbols.append(f"{code}.TWO")
-                    stock_map[f"{code}.TWO"] = info.get('name')
-                    
-        if symbols:
-            st.success("✅ 成功從備用資料庫載入股票清單！")
-            return sorted(list(set(symbols))), stock_map
-            
+        if data.get("status") == 200:
+            for item in data.get("data", []):
+                code = item.get("stock_id")
+                name = item.get("stock_name")
+                
+                # 只抓取 4 碼的台股一般股票
+                if code and len(code) == 4 and code.isdigit():
+                    market = item.get("type")
+                    if market == "twse": # 上市
+                        full_code = f"{code}.TW"
+                        symbols.append(full_code)
+                        stock_map[full_code] = name
+                    elif market == "tpex": # 上櫃
+                        full_code = f"{code}.TWO"
+                        symbols.append(full_code)
+                        stock_map[full_code] = name
+                        
+            if symbols:
+                st.success("✅ 成功從備用資料庫 (FinMind) 載入股票清單！")
+                return sorted(list(set(symbols))), stock_map
+                
     except Exception as e:
         st.error(f"⚠️ 備用資料庫也連線失敗: {e}")
 
@@ -111,7 +116,7 @@ st.title("📊 台股波段精選系統")
 if start_btn:
     symbols, stock_name_map = get_all_tw_symbols()
     
-    # 防呆：如果真的沒抓到清單，直接停止後續掃描動作
+    # 防呆
     if not symbols:
         st.stop()
         
@@ -134,10 +139,9 @@ if start_btn:
     chunk_size = 40
     for i in range(0, stats['total'], chunk_size):
         batch = symbols[i : i + chunk_size]
-        progress_bar.progress(min((i + chunk_size) / stats['total'], 1.0)) # 確保進度條不超過1.0
+        progress_bar.progress(min((i + chunk_size) / stats['total'], 1.0))
         
         try:
-            # yfinance 下載歷史資料
             data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False)
             for s in batch:
                 stats["scanned"] += 1
@@ -149,7 +153,6 @@ if start_btn:
                     p_today, p_prev = float(c.iloc[-1]), float(c.iloc[-2])
                     change = ((p_today - p_prev) / p_prev) * 100
                     
-                    # 邏輯過濾區
                     if change < t_c: stats["r_change"] += 1; continue
                     if v_red and p_today <= o.iloc[-1]: stats["r_red"] += 1; continue
                     
@@ -186,7 +189,6 @@ if start_btn:
         stat_scan.metric("已完成", f"{stats['scanned']}")
         stat_pass.metric("符合條件標的", f"{stats['pass']}")
         
-        # 顯示即時診斷文字
         diag_text = f"""
         - 📥 下載失敗或資料不足: **{stats['fail']}**
         - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
