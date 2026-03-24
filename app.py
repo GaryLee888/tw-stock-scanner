@@ -50,7 +50,7 @@ def get_all_tw_symbols():
             return sorted(list(set(symbols))), stock_map
             
     except Exception as e:
-        pass # 如果被阻擋，默默進入備用方案
+        pass 
 
     # 嘗試 2：穩定版備用資料庫 (FinMind API)
     try:
@@ -117,6 +117,12 @@ if start_btn:
     if not symbols:
         st.stop()
         
+    # 【新增重點】為 yfinance 建立專屬的連線 Session，偽裝成真人瀏覽器
+    yf_session = requests.Session()
+    yf_session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+        
     candidates = []
     stats = {
         "total": len(symbols), "scanned": 0, "fail": 0, 
@@ -129,20 +135,28 @@ if start_btn:
     stat_scan = m2.metric("已完成", "0")
     stat_pass = m3.metric("符合條件標的", "0")
     
-    st.subheader("🛠️ 即時過濾診斷日誌 (為避免阻擋，預計需時 3-5 分鐘)")
+    st.subheader("🛠️ 即時過濾診斷日誌 (為避免 Yahoo 阻擋，已啟用防護並放慢速度)")
     diag_status = st.empty() 
     progress_bar = st.progress(0)
     
-    # 【修改重點 1】降低每次抓取的數量，避免觸發 Too Many Requests
-    chunk_size = 20 
+    # 將批次調為 15，兼顧速度與穩定性
+    chunk_size = 15 
     
     for i in range(0, stats['total'], chunk_size):
         batch = symbols[i : i + chunk_size]
         progress_bar.progress(min((i + chunk_size) / stats['total'], 1.0))
         
         try:
-            # 加入 threads=False 避免併發請求過多
-            data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False)
+            # 【新增重點】將 session 參數傳遞給 yf.download
+            data = yf.download(
+                batch, 
+                period="60d", 
+                group_by='ticker', 
+                progress=False, 
+                auto_adjust=True, 
+                threads=False, 
+                session=yf_session  # 使用我們偽裝好的 Session
+            )
             
             for s in batch:
                 stats["scanned"] += 1
@@ -189,7 +203,6 @@ if start_btn:
                 except: 
                     stats["fail"] += 1
         except Exception as e:
-            # 如果整批都失敗（例如又被限流），直接把這批記為 fail
             stats["fail"] += len(batch)
             stats["scanned"] += len(batch)
         
@@ -197,7 +210,7 @@ if start_btn:
         stat_pass.metric("符合條件標的", f"{stats['pass']}")
         
         diag_text = f"""
-        - 📥 下載失敗或無資料 (包含特別股/下市): **{stats['fail']}**
+        - 📥 下載無資料 (少數 ETF/下市/被擋): **{stats['fail']}**
         - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
         - ❌ 未收紅K: **{stats['r_red']}**
         - ❌ 均線未站上 (5MA/20MA): **{stats['r_ma']}**
@@ -208,8 +221,8 @@ if start_btn:
         """
         diag_status.markdown(diag_text)
         
-        # 【修改重點 2】強制休息 2 秒，避免被 Yahoo 封鎖
-        time.sleep(2)
+        # 休息 2.5 秒，確保安全過關
+        time.sleep(2.5)
 
     st.divider()
     if candidates:
