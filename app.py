@@ -10,9 +10,13 @@ import io
 import time
 import random
 import urllib3
+import logging # 新增：用來控制日誌顯示
 
+# --- 終極靜音設定 ---
 # 禁用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# 禁用 yfinance 在終端機狂印 possibly delisted 的紅字錯誤
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # --- 頁面配置 ---
 st.set_page_config(page_title="台股波段完整診斷版", layout="wide")
@@ -42,19 +46,14 @@ def get_all_tw_symbols():
             df = pd.read_html(io.StringIO(res.text), flavor='html5lib')[0]
             df.columns = df.iloc[0]
             
-            # 同時讀取代號與 CFICode (用來確認是否為普通股)
             for item, cfi in zip(df['有價證券代號及名稱'].iloc[2:], df['CFICode'].iloc[2:]):
                 if '　' in str(item):
                     code, name = str(item).split('　')
-                    
-                    # 嚴格過濾：4碼、純數字、且開頭不能是 0(ETF) 或 9(TDR)
                     if len(code) == 4 and code.isdigit() and code[0] not in ['0', '9']:
-                        # 雙重確認：CFICode 必須是 ES 開頭 (代表 Equity Shares 普通股)
                         if str(cfi).startswith('ES'):
                             full_code = f"{code}{suffix}"
                             symbols.append(full_code)
                             stock_map[full_code] = name
-                            
         if symbols:
             return sorted(list(set(symbols))), stock_map
     except:
@@ -69,15 +68,13 @@ def get_all_tw_symbols():
             for item in data.get("data", []):
                 code = item.get("stock_id")
                 name = item.get("stock_name")
-                
-                # 嚴格過濾：4碼、純數字、且開頭不能是 0 或 9
                 if code and len(code) == 4 and code.isdigit() and code[0] not in ['0', '9']:
                     market = item.get("type")
-                    if market == "twse": # 上市
+                    if market == "twse": 
                         full_code = f"{code}.TW"
                         symbols.append(full_code)
                         stock_map[full_code] = name
-                    elif market in ["tpex", "rotc"]: # 上櫃(tpex) 或 興櫃(rotc)
+                    elif market in ["tpex", "rotc"]: 
                         full_code = f"{code}.TWO"
                         symbols.append(full_code)
                         stock_map[full_code] = name
@@ -206,7 +203,6 @@ if start_btn:
                                     if not (k_val > d_val and k_val < k_limit):
                                         stats["r_kd"] += 1
                                     else:
-                                        # 全部過關！
                                         stats["pass"] += 1
                                         score = (change * 0.4) + float((v.iloc[-1] / vma5) * 4) + (10 - bias)
                                         sl = max(p_today - float(atr_s.iloc[-1] * atr_multi), float(l.tail(10).min()) * 0.99)
@@ -219,14 +215,13 @@ if start_btn:
             except Exception as e:
                 stats["fail"] += 1
             
-        # 為了順暢度，每掃描 10 檔或最後一檔時才更新一次畫面
         if i % 10 == 0 or i == stats['total'] - 1:
             progress_bar.progress((i + 1) / stats['total'])
             stat_scan.metric("已完成", f"{stats['scanned']}")
             stat_pass.metric("符合條件標的", f"{stats['pass']}")
             
             diag_text = f"""
-            - 📥 查無資料 (可能無交易量之興櫃/下市): **{stats['fail']}**
+            - 📥 查無資料 (可能無交易量之興櫃/暫停交易): **{stats['fail']}**
             - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
             - ❌ 未收紅K: **{stats['r_red']}**
             - ❌ 均線未站上 (5MA/20MA): **{stats['r_ma']}**
@@ -237,7 +232,6 @@ if start_btn:
             """
             diag_status.markdown(diag_text)
             
-        # 隨機休息 0.1 到 0.4 秒
         time.sleep(random.uniform(0.1, 0.4))
 
     st.divider()
