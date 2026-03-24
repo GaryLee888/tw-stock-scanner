@@ -24,7 +24,12 @@ def get_all_tw_symbols():
     symbols = []
     stock_map = {}
     urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    # 換成更像真人瀏覽器的 User-Agent，避免被證交所阻擋
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
     for url in urls:
         try:
             res = requests.get(url, headers=headers, timeout=15, verify=False)
@@ -39,7 +44,14 @@ def get_all_tw_symbols():
                         full_code = f"{code}{suffix}"
                         symbols.append(full_code)
                         stock_map[full_code] = name
-        except: pass
+        except Exception as e:
+            # 把錯誤印出來，方便除錯
+            st.error(f"⚠️ 獲取清單失敗: {url}\n錯誤細節: {e}")
+
+    # 如果清單是空的，在畫面上跳出嚴重警告
+    if not symbols:
+        st.error("🚨 警告：無法獲取台股代碼清單！請檢查網路連線或證交所網站是否異常。")
+
     return sorted(list(set(symbols))), stock_map
 
 # --- 側邊欄：完整參數保持 ---
@@ -71,6 +83,11 @@ st.title("📊 台股波段精選系統")
 
 if start_btn:
     symbols, stock_name_map = get_all_tw_symbols()
+    
+    # 增加一層防呆：如果真的沒抓到清單，直接停止後續掃描動作
+    if not symbols:
+        st.stop()
+        
     candidates = []
     stats = {
         "total": len(symbols), "scanned": 0, "fail": 0, 
@@ -90,7 +107,7 @@ if start_btn:
     chunk_size = 40
     for i in range(0, stats['total'], chunk_size):
         batch = symbols[i : i + chunk_size]
-        progress_bar.progress(i / stats['total'])
+        progress_bar.progress(min((i + chunk_size) / stats['total'], 1.0)) # 確保進度條不超過1.0
         
         try:
             data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False)
@@ -165,7 +182,9 @@ if start_btn:
             msg = "📊 **台股波段掃描戰報**\n"
             for _, row in final_df.iterrows():
                 msg += f"🔹 {row['代碼']} {row['名稱']} | 價: {row['現價']} | 漲: {row['漲幅%']}% | 評分: {row['評分']}\n"
-            requests.post(webhook_url, json={"content": msg})
+            try:
+                requests.post(webhook_url, json={"content": msg})
+            except Exception as e:
+                st.warning(f"Discord 訊息發送失敗: {e}")
     else:
         st.error("😭 掃描完成，無符合條件標的。請檢查日誌調整參數。")
-
