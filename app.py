@@ -63,14 +63,13 @@ def get_all_tw_symbols():
                 code = item.get("stock_id")
                 name = item.get("stock_name")
                 
-                # 只抓取 4 碼的台股一般股票
                 if code and len(code) == 4 and code.isdigit():
                     market = item.get("type")
-                    if market == "twse": # 上市
+                    if market == "twse": 
                         full_code = f"{code}.TW"
                         symbols.append(full_code)
                         stock_map[full_code] = name
-                    elif market == "tpex": # 上櫃
+                    elif market == "tpex": 
                         full_code = f"{code}.TWO"
                         symbols.append(full_code)
                         stock_map[full_code] = name
@@ -82,11 +81,10 @@ def get_all_tw_symbols():
     except Exception as e:
         st.error(f"⚠️ 備用資料庫也連線失敗: {e}")
 
-    # 如果兩個都失敗
     st.error("🚨 警告：無法獲取台股代碼清單！請檢查網路連線。")
     return [], {}
 
-# --- 側邊欄：完整參數保持 ---
+# --- 側邊欄 ---
 with st.sidebar:
     st.header("⚙️ 策略完整參數")
     webhook_url = st.text_input("Discord Webhook", value=DEFAULT_WEBHOOK, type="password")
@@ -116,7 +114,6 @@ st.title("📊 台股波段精選系統")
 if start_btn:
     symbols, stock_name_map = get_all_tw_symbols()
     
-    # 防呆
     if not symbols:
         st.stop()
         
@@ -132,22 +129,28 @@ if start_btn:
     stat_scan = m2.metric("已完成", "0")
     stat_pass = m3.metric("符合條件標的", "0")
     
-    st.subheader("🛠️ 即時過濾診斷日誌")
+    st.subheader("🛠️ 即時過濾診斷日誌 (為避免阻擋，預計需時 3-5 分鐘)")
     diag_status = st.empty() 
     progress_bar = st.progress(0)
     
-    chunk_size = 40
+    # 【修改重點 1】降低每次抓取的數量，避免觸發 Too Many Requests
+    chunk_size = 20 
+    
     for i in range(0, stats['total'], chunk_size):
         batch = symbols[i : i + chunk_size]
         progress_bar.progress(min((i + chunk_size) / stats['total'], 1.0))
         
         try:
+            # 加入 threads=False 避免併發請求過多
             data = yf.download(batch, period="60d", group_by='ticker', progress=False, auto_adjust=True, threads=False)
+            
             for s in batch:
                 stats["scanned"] += 1
                 try:
                     df = data[s].dropna() if len(batch) > 1 else data.dropna()
-                    if len(df) < 35: stats["fail"] += 1; continue
+                    if len(df) < 35: 
+                        stats["fail"] += 1
+                        continue
                     
                     c, h, l, v, o = df['Close'], df['High'], df['Low'], df['Volume'], df['Open']
                     p_today, p_prev = float(c.iloc[-1]), float(c.iloc[-2])
@@ -183,14 +186,18 @@ if start_btn:
                         "漲幅%": round(change, 2), "評分": round(score, 1), "乖離%": round(bias, 1),
                         "VCP比": round(vcp_val, 2), "score": score, "sl": sl, "tp": p_today + (p_today-sl)*2
                     })
-                except: stats["fail"] += 1
-        except: pass
+                except: 
+                    stats["fail"] += 1
+        except Exception as e:
+            # 如果整批都失敗（例如又被限流），直接把這批記為 fail
+            stats["fail"] += len(batch)
+            stats["scanned"] += len(batch)
         
         stat_scan.metric("已完成", f"{stats['scanned']}")
         stat_pass.metric("符合條件標的", f"{stats['pass']}")
         
         diag_text = f"""
-        - 📥 下載失敗或資料不足: **{stats['fail']}**
+        - 📥 下載失敗或無資料 (包含特別股/下市): **{stats['fail']}**
         - ❌ 漲幅不足 (<{t_c}%): **{stats['r_change']}**
         - ❌ 未收紅K: **{stats['r_red']}**
         - ❌ 均線未站上 (5MA/20MA): **{stats['r_ma']}**
@@ -200,6 +207,9 @@ if start_btn:
         - ❌ KD指標不符: **{stats['r_kd']}**
         """
         diag_status.markdown(diag_text)
+        
+        # 【修改重點 2】強制休息 2 秒，避免被 Yahoo 封鎖
+        time.sleep(2)
 
     st.divider()
     if candidates:
